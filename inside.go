@@ -44,14 +44,17 @@ func (f *Interface) consumeInsidePacket(packet []byte, fwPacket *FirewallPacket,
 		ci.queueLock.Unlock()
 	}
 
-	if !f.firewall.Drop(packet, *fwPacket, false, hostinfo, trustedCAs) {
+	dropReason := f.firewall.Drop(packet, *fwPacket, false, hostinfo, trustedCAs)
+	if dropReason == nil {
 		f.send(message, 0, ci, hostinfo, hostinfo.remote, packet, nb, out)
 		if f.lightHouse != nil && *ci.messageCounter%5000 == 0 {
 			f.lightHouse.Query(fwPacket.RemoteIP, f)
 		}
 
 	} else if l.Level >= logrus.DebugLevel {
-		l.WithField("vpnIp", IntIp(hostinfo.hostId)).WithField("fwPacket", fwPacket).
+		hostinfo.logger().
+			WithField("fwPacket", fwPacket).
+			WithField("reason", dropReason).
 			Debugln("dropping outbound packet")
 	}
 }
@@ -105,8 +108,11 @@ func (f *Interface) sendMessageNow(t NebulaMessageType, st NebulaMessageSubType,
 	}
 
 	// check if packet is in outbound fw rules
-	if f.firewall.Drop(p, *fp, false, hostInfo, trustedCAs) {
-		l.WithField("fwPacket", fp).Debugln("dropping cached packet")
+	dropReason := f.firewall.Drop(p, *fp, false, hostInfo, trustedCAs)
+	if dropReason != nil && l.Level >= logrus.DebugLevel {
+		l.WithField("fwPacket", fp).
+			WithField("reason", dropReason).
+			Debugln("dropping cached packet")
 		return
 	}
 
@@ -185,7 +191,7 @@ func (f *Interface) send(t NebulaMessageType, st NebulaMessageSubType, ci *Conne
 	//TODO: see above note on lock
 	//ci.writeLock.Unlock()
 	if err != nil {
-		l.WithError(err).WithField("vpnIp", IntIp(hostinfo.hostId)).
+		hostinfo.logger().WithError(err).
 			WithField("udpAddr", remote).WithField("counter", c).
 			WithField("attemptedCounter", ci.messageCounter).
 			Error("Failed to encrypt outgoing packet")
@@ -194,7 +200,7 @@ func (f *Interface) send(t NebulaMessageType, st NebulaMessageSubType, ci *Conne
 
 	err = f.outside.WriteTo(out, remote)
 	if err != nil {
-		l.WithError(err).WithField("vpnIp", IntIp(hostinfo.hostId)).
+		hostinfo.logger().WithError(err).
 			WithField("udpAddr", remote).Error("Failed to write outgoing packet")
 	}
 }

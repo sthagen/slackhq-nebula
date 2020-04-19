@@ -101,32 +101,35 @@ func Main(configPath string, configTest bool, buildVersion string) {
 	// tun config, listeners, anything modifying the computer should be below
 	////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
-	if configTest {
-		os.Exit(0)
-	}
+	var tun *Tun
+	if !configTest {
+		config.CatchHUP()
 
-	config.CatchHUP()
-
-	// set up our tun dev
-	tun, err := newTun(
-		config.GetString("tun.dev", ""),
-		tunCidr,
-		config.GetInt("tun.mtu", DEFAULT_MTU),
-		routes,
-		unsafeRoutes,
-		config.GetInt("tun.tx_queue", 500),
-	)
-	if err != nil {
-		l.WithError(err).Fatal("Failed to get a tun/tap device")
+		// set up our tun dev
+		tun, err = newTun(
+			config.GetString("tun.dev", ""),
+			tunCidr,
+			config.GetInt("tun.mtu", DEFAULT_MTU),
+			routes,
+			unsafeRoutes,
+			config.GetInt("tun.tx_queue", 500),
+		)
+		if err != nil {
+			l.WithError(err).Fatal("Failed to get a tun/tap device")
+		}
 	}
 
 	// set up our UDP listener
 	udpQueues := config.GetInt("listen.routines", 1)
-	udpServer, err := NewListener(config.GetString("listen.host", "0.0.0.0"), config.GetInt("listen.port", 0), udpQueues > 1)
-	if err != nil {
-		l.WithError(err).Fatal("Failed to open udp listener")
+	var udpServer *udpConn
+
+	if !configTest {
+		udpServer, err = NewListener(config.GetString("listen.host", "0.0.0.0"), config.GetInt("listen.port", 0), udpQueues > 1)
+		if err != nil {
+			l.WithError(err).Fatal("Failed to open udp listener")
+		}
+		udpServer.reloadConfig(config)
 	}
-	udpServer.reloadConfig(config)
 
 	// Set up my internal host map
 	var preferredRanges []*net.IPNet
@@ -178,14 +181,14 @@ func Main(configPath string, configTest bool, buildVersion string) {
 	*/
 
 	punchy := NewPunchyFromConfig(config)
-	if punchy.Punch {
+	if punchy.Punch && !configTest {
 		l.Info("UDP hole punching enabled")
 		go hostMap.Punchy(udpServer)
 	}
 
 	port := config.GetInt("listen.port", 0)
 	// If port is dynamic, discover it
-	if port == 0 {
+	if port == 0 && !configTest {
 		uPort, err := udpServer.LocalAddr()
 		if err != nil {
 			l.WithError(err).Fatal("Failed to get listening port")
@@ -224,6 +227,18 @@ func Main(configPath string, configTest bool, buildVersion string) {
 		punchy.Respond,
 		punchy.Delay,
 	)
+
+	remoteAllowList, err := config.GetAllowList("lighthouse.remote_allow_list", false)
+	if err != nil {
+		l.WithError(err).Fatal("Invalid lighthouse.remote_allow_list")
+	}
+	lightHouse.SetRemoteAllowList(remoteAllowList)
+
+	localAllowList, err := config.GetAllowList("lighthouse.local_allow_list", true)
+	if err != nil {
+		l.WithError(err).Fatal("Invalid lighthouse.local_allow_list")
+	}
+	lightHouse.SetLocalAllowList(localAllowList)
 
 	//TODO: Move all of this inside functions in lighthouse.go
 	for k, v := range config.GetMap("static_host_map", map[interface{}]interface{}{}) {
@@ -306,19 +321,26 @@ func Main(configPath string, configTest bool, buildVersion string) {
 		l.Fatalf("Unknown cipher: %v", ifConfig.Cipher)
 	}
 
-	ifce, err := NewInterface(ifConfig)
-	if err != nil {
-		l.WithError(err).Fatal("Failed to initialize interface")
+	var ifce *Interface
+	if !configTest {
+		ifce, err = NewInterface(ifConfig)
+		if err != nil {
+			l.WithError(err).Fatal("Failed to initialize interface")
+		}
+
+		ifce.RegisterConfigChangeCallbacks(config)
+
+		go handshakeManager.Run(ifce)
+		go lightHouse.LhUpdateWorker(ifce)
 	}
 
-	ifce.RegisterConfigChangeCallbacks(config)
-
-	go handshakeManager.Run(ifce)
-	go lightHouse.LhUpdateWorker(ifce)
-
-	err = startStats(config)
+	err = startStats(config, configTest)
 	if err != nil {
 		l.WithError(err).Fatal("Failed to start stats emitter")
+	}
+
+	if configTest {
+		os.Exit(0)
 	}
 
 	//TODO: check if we _should_ be emitting stats
