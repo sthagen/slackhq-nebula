@@ -1,3 +1,5 @@
+// +build !ios
+
 package nebula
 
 import (
@@ -20,8 +22,9 @@ type Tun struct {
 
 func newTun(deviceName string, cidr *net.IPNet, defaultMTU int, routes []route, unsafeRoutes []route, txQueueLen int) (ifce *Tun, err error) {
 	if len(routes) > 0 {
-		return nil, fmt.Errorf("Route MTU not supported in Darwin")
+		return nil, fmt.Errorf("route MTU not supported in Darwin")
 	}
+
 	// NOTE: You cannot set the deviceName under Darwin, so you must check tun.Device after calling .Activate()
 	return &Tun{
 		Cidr:         cidr,
@@ -30,13 +33,17 @@ func newTun(deviceName string, cidr *net.IPNet, defaultMTU int, routes []route, 
 	}, nil
 }
 
+func newTunFromFd(deviceFd int, cidr *net.IPNet, defaultMTU int, routes []route, unsafeRoutes []route, txQueueLen int) (ifce *Tun, err error) {
+	return nil, fmt.Errorf("newTunFromFd not supported in Darwin")
+}
+
 func (c *Tun) Activate() error {
 	var err error
 	c.Interface, err = water.New(water.Config{
 		DeviceType: water.TUN,
 	})
 	if err != nil {
-		return fmt.Errorf("Activate failed: %v", err)
+		return fmt.Errorf("activate failed: %v", err)
 	}
 
 	c.Device = c.Interface.Name()

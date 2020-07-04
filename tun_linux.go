@@ -1,3 +1,5 @@
+// +build !android
+
 package nebula
 
 import (
@@ -73,6 +75,23 @@ type ifreqQLEN struct {
 	Name  [16]byte
 	Value int32
 	pad   [8]byte
+}
+
+func newTunFromFd(deviceFd int, cidr *net.IPNet, defaultMTU int, routes []route, unsafeRoutes []route, txQueueLen int) (ifce *Tun, err error) {
+
+	file := os.NewFile(uintptr(deviceFd), "/dev/net/tun")
+
+	ifce = &Tun{
+		ReadWriteCloser: file,
+		fd:              int(file.Fd()),
+		Device:          "tun0",
+		Cidr:            cidr,
+		DefaultMTU:      defaultMTU,
+		TXQueueLen:      txQueueLen,
+		Routes:          routes,
+		UnsafeRoutes:    unsafeRoutes,
+	}
+	return
 }
 
 func newTun(deviceName string, cidr *net.IPNet, defaultMTU int, routes []route, unsafeRoutes []route, txQueueLen int) (ifce *Tun, err error) {
@@ -216,6 +235,7 @@ func (c Tun) Activate() error {
 		LinkIndex: link.Attrs().Index,
 		Dst:       dr,
 		MTU:       c.DefaultMTU,
+		AdvMSS:    c.advMSS(route{}),
 		Scope:     unix.RT_SCOPE_LINK,
 		Src:       c.Cidr.IP,
 		Protocol:  unix.RTPROT_KERNEL,
@@ -233,6 +253,7 @@ func (c Tun) Activate() error {
 			LinkIndex: link.Attrs().Index,
 			Dst:       r.route,
 			MTU:       r.mtu,
+			AdvMSS:    c.advMSS(r),
 			Scope:     unix.RT_SCOPE_LINK,
 		}
 
@@ -248,6 +269,7 @@ func (c Tun) Activate() error {
 			LinkIndex: link.Attrs().Index,
 			Dst:       r.route,
 			MTU:       r.mtu,
+			AdvMSS:    c.advMSS(r),
 			Scope:     unix.RT_SCOPE_LINK,
 		}
 
@@ -264,4 +286,17 @@ func (c Tun) Activate() error {
 	}
 
 	return nil
+}
+
+func (c Tun) advMSS(r route) int {
+	mtu := r.mtu
+	if r.mtu == 0 {
+		mtu = c.DefaultMTU
+	}
+
+	// We only need to set advmss if the route MTU does not match the device MTU
+	if mtu != c.MaxMTU {
+		return mtu - 40
+	}
+	return 0
 }
