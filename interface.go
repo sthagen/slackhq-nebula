@@ -2,6 +2,8 @@ package nebula
 
 import (
 	"errors"
+	"io"
+	"net"
 	"os"
 	"time"
 
@@ -10,10 +12,18 @@ import (
 
 const mtu = 9001
 
+type Inside interface {
+	io.ReadWriteCloser
+	Activate() error
+	CidrNet() *net.IPNet
+	DeviceName() string
+	WriteRaw([]byte) error
+}
+
 type InterfaceConfig struct {
 	HostMap                 *HostMap
 	Outside                 *udpConn
-	Inside                  *Tun
+	Inside                  Inside
 	certState               *CertState
 	Cipher                  string
 	Firewall                *Firewall
@@ -31,7 +41,7 @@ type InterfaceConfig struct {
 type Interface struct {
 	hostMap            *HostMap
 	outside            *udpConn
-	inside             *Tun
+	inside             Inside
 	certState          *CertState
 	cipher             string
 	firewall           *Firewall
@@ -101,7 +111,7 @@ func (f *Interface) Run(tunRoutines, udpRoutines int, buildVersion string) {
 		l.WithError(err).Error("Failed to get udp listen address")
 	}
 
-	l.WithField("interface", f.inside.Device).WithField("network", f.inside.Cidr.String()).
+	l.WithField("interface", f.inside.DeviceName()).WithField("network", f.inside.CidrNet().String()).
 		WithField("build", buildVersion).WithField("udpAddr", addr).
 		Info("Nebula interface is active")
 
@@ -209,11 +219,28 @@ func (f *Interface) reloadFirewall(c *Config) {
 	}
 
 	oldFw := f.firewall
+	conntrack := oldFw.Conntrack
+	conntrack.Lock()
+	defer conntrack.Unlock()
+
+	fw.rulesVersion = oldFw.rulesVersion + 1
+	// If rulesVersion is back to zero, we have wrapped all the way around. Be
+	// safe and just reset conntrack in this case.
+	if fw.rulesVersion == 0 {
+		l.WithField("firewallHash", fw.GetRuleHash()).
+			WithField("oldFirewallHash", oldFw.GetRuleHash()).
+			WithField("rulesVersion", fw.rulesVersion).
+			Warn("firewall rulesVersion has overflowed, resetting conntrack")
+	} else {
+		fw.Conntrack = conntrack
+	}
+
 	f.firewall = fw
 
 	oldFw.Destroy()
 	l.WithField("firewallHash", fw.GetRuleHash()).
 		WithField("oldFirewallHash", oldFw.GetRuleHash()).
+		WithField("rulesVersion", fw.rulesVersion).
 		Info("New firewall has been installed")
 }
 
