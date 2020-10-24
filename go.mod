@@ -11,7 +11,7 @@ require (
 	github.com/flynn/noise v0.0.0-20180327030543-2492fe189ae6
 	github.com/golang/protobuf v1.3.2
 	github.com/imdario/mergo v0.3.8
-	github.com/kardianos/service v1.0.0
+	github.com/kardianos/service v1.1.0
 	github.com/konsorten/go-windows-terminal-sequences v1.0.2 // indirect
 	github.com/kr/pretty v0.1.0 // indirect
 	github.com/miekg/dns v1.1.25
@@ -22,7 +22,7 @@ require (
 	github.com/rcrowley/go-metrics v0.0.0-20190826022208-cac0b30c2563
 	github.com/sirupsen/logrus v1.4.2
 	github.com/songgao/water v0.0.0-20190725173103-fd331bda3f4b
-	github.com/stretchr/testify v1.4.0
+	github.com/stretchr/testify v1.6.1
 	github.com/vishvananda/netlink v1.0.1-0.20190522153524-00009fb8606a
 	github.com/vishvananda/netns v0.0.0-20191106174202-0a2b9b5464df // indirect
 	golang.org/x/crypto v0.0.0-20200220183623-bac4c82f6975

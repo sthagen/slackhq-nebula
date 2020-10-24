@@ -66,10 +66,11 @@ func configSSH(ssh *sshd.SSHServer, c *Config) error {
 		return fmt.Errorf("sshd.listen must be provided")
 	}
 
-	port := strings.Split(listen, ":")
-	if len(port) < 2 {
-		return fmt.Errorf("sshd.listen does not have a port")
-	} else if port[1] == "22" {
+	_, port, err := net.SplitHostPort(listen)
+	if err != nil {
+		return fmt.Errorf("invalid sshd.listen address: %s", err)
+	}
+	if port == "22" {
 		return fmt.Errorf("sshd.listen can not use port 22")
 	}
 
@@ -462,7 +463,12 @@ func sshQueryLighthouse(ifce *Interface, fs interface{}, a []string, w sshd.Stri
 		return w.WriteLine("No vpn ip was provided")
 	}
 
-	vpnIp := ip2int(net.ParseIP(a[0]))
+	parsedIp := net.ParseIP(a[0])
+	if parsedIp == nil {
+		return w.WriteLine(fmt.Sprintf("The provided vpn ip could not be parsed: %s", a[0]))
+	}
+
+	vpnIp := ip2int(parsedIp)
 	if vpnIp == 0 {
 		return w.WriteLine(fmt.Sprintf("The provided vpn ip could not be parsed: %s", a[0]))
 	}
@@ -482,7 +488,12 @@ func sshCloseTunnel(ifce *Interface, fs interface{}, a []string, w sshd.StringWr
 		return w.WriteLine("No vpn ip was provided")
 	}
 
-	vpnIp := ip2int(net.ParseIP(a[0]))
+	parsedIp := net.ParseIP(a[0])
+	if parsedIp == nil {
+		return w.WriteLine(fmt.Sprintf("The provided vpn ip could not be parsed: %s", a[0]))
+	}
+
+	vpnIp := ip2int(parsedIp)
 	if vpnIp == 0 {
 		return w.WriteLine(fmt.Sprintf("The provided vpn ip could not be parsed: %s", a[0]))
 	}
@@ -520,7 +531,12 @@ func sshCreateTunnel(ifce *Interface, fs interface{}, a []string, w sshd.StringW
 		return w.WriteLine("No vpn ip was provided")
 	}
 
-	vpnIp := ip2int(net.ParseIP(a[0]))
+	parsedIp := net.ParseIP(a[0])
+	if parsedIp == nil {
+		return w.WriteLine(fmt.Sprintf("The provided vpn ip could not be parsed: %s", a[0]))
+	}
+
+	vpnIp := ip2int(parsedIp)
 	if vpnIp == 0 {
 		return w.WriteLine(fmt.Sprintf("The provided vpn ip could not be parsed: %s", a[0]))
 	}
@@ -572,7 +588,12 @@ func sshChangeRemote(ifce *Interface, fs interface{}, a []string, w sshd.StringW
 		return w.WriteLine("Address could not be parsed")
 	}
 
-	vpnIp := ip2int(net.ParseIP(a[0]))
+	parsedIp := net.ParseIP(a[0])
+	if parsedIp == nil {
+		return w.WriteLine(fmt.Sprintf("The provided vpn ip could not be parsed: %s", a[0]))
+	}
+
+	vpnIp := ip2int(parsedIp)
 	if vpnIp == 0 {
 		return w.WriteLine(fmt.Sprintf("The provided vpn ip could not be parsed: %s", a[0]))
 	}
@@ -648,7 +669,12 @@ func sshPrintCert(ifce *Interface, fs interface{}, a []string, w sshd.StringWrit
 
 	cert := ifce.certState.certificate
 	if len(a) > 0 {
-		vpnIp := ip2int(net.ParseIP(a[0]))
+		parsedIp := net.ParseIP(a[0])
+		if parsedIp == nil {
+			return w.WriteLine(fmt.Sprintf("The provided vpn ip could not be parsed: %s", a[0]))
+		}
+
+		vpnIp := ip2int(parsedIp)
 		if vpnIp == 0 {
 			return w.WriteLine(fmt.Sprintf("The provided vpn ip could not be parsed: %s", a[0]))
 		}
@@ -695,7 +721,12 @@ func sshPrintTunnel(ifce *Interface, fs interface{}, a []string, w sshd.StringWr
 		return w.WriteLine("No vpn ip was provided")
 	}
 
-	vpnIp := ip2int(net.ParseIP(a[0]))
+	parsedIp := net.ParseIP(a[0])
+	if parsedIp == nil {
+		return w.WriteLine(fmt.Sprintf("The provided vpn ip could not be parsed: %s", a[0]))
+	}
+
+	vpnIp := ip2int(parsedIp)
 	if vpnIp == 0 {
 		return w.WriteLine(fmt.Sprintf("The provided vpn ip could not be parsed: %s", a[0]))
 	}
