@@ -96,6 +96,11 @@ func (u *udpConn) reloadConfig(c *Config) {
 	// TODO
 }
 
+func NewUDPStatsEmitter(udpConns []*udpConn) func() {
+	// No UDP stats for non-linux
+	return func() {}
+}
+
 type rawMessage struct {
 	Len uint32
 }
@@ -110,6 +115,8 @@ func (u *udpConn) ListenOut(f *Interface, q int) {
 
 	lhh := f.lightHouse.NewRequestHandler()
 
+	conntrackCache := NewConntrackCacheTicker(f.conntrackCacheTimeout)
+
 	for {
 		// Just read one packet at a time
 		n, rua, err := u.ReadFromUDP(buffer)
@@ -119,7 +126,7 @@ func (u *udpConn) ListenOut(f *Interface, q int) {
 		}
 
 		udpAddr.UDPAddr = *rua
-		f.readOutsidePackets(udpAddr, plaintext[:0], buffer[:n], header, fwPacket, lhh, nb, q)
+		f.readOutsidePackets(udpAddr, plaintext[:0], buffer[:n], header, fwPacket, lhh, nb, q, conntrackCache.Get())
 	}
 }
 

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/rcrowley/go-metrics"
@@ -19,7 +20,7 @@ const MaxRemotes = 10
 
 // How long we should prevent roaming back to the previous IP.
 // This helps prevent flapping due to packets already in flight
-const RoamingSupressSeconds = 2
+const RoamingSuppressSeconds = 2
 
 type HostMap struct {
 	sync.RWMutex    //Because we concurrently read and write to our maps
@@ -35,6 +36,8 @@ type HostMap struct {
 }
 
 type HostInfo struct {
+	sync.RWMutex
+
 	remote            *udpAddr
 	Remotes           []*HostInfoDest
 	promoteCounter    uint32
@@ -50,6 +53,11 @@ type HostInfo struct {
 	hostId            uint32
 	recvError         int
 	remoteCidr        *CIDRTree
+
+	// lastRebindCount is the other side of Interface.rebindCount, if these values don't match then we need to ask LH
+	// for a punch from the remote end of this tunnel. The goal being to prime their conntrack for our traffic just like
+	// with a handshake
+	lastRebindCount int8
 
 	lastRoam       time.Time
 	lastRoamRemote *udpAddr
@@ -158,40 +166,6 @@ func (hm *HostMap) DeleteVpnIP(vpnIP uint32) {
 	}
 }
 
-func (hm *HostMap) AddIndex(index uint32, ci *ConnectionState) (*HostInfo, error) {
-	hm.Lock()
-	if _, ok := hm.Indexes[index]; !ok {
-		h := &HostInfo{
-			ConnectionState: ci,
-			Remotes:         []*HostInfoDest{},
-			localIndexId:    index,
-			HandshakePacket: make(map[uint8][]byte, 0),
-		}
-		hm.Indexes[index] = h
-		l.WithField("hostMap", m{"mapName": hm.name, "indexNumber": index, "mapTotalSize": len(hm.Indexes),
-			"hostinfo": m{"existing": false, "localIndexId": h.localIndexId, "hostId": IntIp(h.hostId)}}).
-			Debug("Hostmap index added")
-
-		hm.Unlock()
-		return h, nil
-	}
-	hm.Unlock()
-	return nil, fmt.Errorf("refusing to overwrite existing index: %d", index)
-}
-
-func (hm *HostMap) AddIndexHostInfo(index uint32, h *HostInfo) {
-	hm.Lock()
-	h.localIndexId = index
-	hm.Indexes[index] = h
-	hm.Unlock()
-
-	if l.Level > logrus.DebugLevel {
-		l.WithField("hostMap", m{"mapName": hm.name, "indexNumber": index, "mapTotalSize": len(hm.Indexes),
-			"hostinfo": m{"existing": true, "localIndexId": h.localIndexId, "hostId": IntIp(h.hostId)}}).
-			Debug("Hostmap index added")
-	}
-}
-
 // Only used by pendingHostMap when the remote index is not initially known
 func (hm *HostMap) addRemoteIndexHostInfo(index uint32, h *HostInfo) {
 	hm.Lock()
@@ -221,11 +195,20 @@ func (hm *HostMap) AddVpnIPHostInfo(vpnIP uint32, h *HostInfo) {
 	}
 }
 
+// This is only called in pendingHostmap, to cleanup an inbound handshake
 func (hm *HostMap) DeleteIndex(index uint32) {
 	hm.Lock()
-	delete(hm.Indexes, index)
-	if len(hm.Indexes) == 0 {
-		hm.Indexes = map[uint32]*HostInfo{}
+	hostinfo, ok := hm.Indexes[index]
+	if ok {
+		delete(hm.Indexes, index)
+		delete(hm.RemoteIndexes, hostinfo.remoteIndexId)
+
+		// Check if we have an entry under hostId that matches the same hostinfo
+		// instance. Clean it up as well if we do.
+		hostinfo2, ok := hm.Hosts[hostinfo.hostId]
+		if ok && hostinfo2 == hostinfo {
+			delete(hm.Hosts, hostinfo.hostId)
+		}
 	}
 	hm.Unlock()
 
@@ -235,8 +218,43 @@ func (hm *HostMap) DeleteIndex(index uint32) {
 	}
 }
 
+// This is used to cleanup on recv_error
+func (hm *HostMap) DeleteReverseIndex(index uint32) {
+	hm.Lock()
+	hostinfo, ok := hm.RemoteIndexes[index]
+	if ok {
+		delete(hm.Indexes, hostinfo.localIndexId)
+		delete(hm.RemoteIndexes, index)
+
+		// Check if we have an entry under hostId that matches the same hostinfo
+		// instance. Clean it up as well if we do (they might not match in pendingHostmap)
+		var hostinfo2 *HostInfo
+		hostinfo2, ok = hm.Hosts[hostinfo.hostId]
+		if ok && hostinfo2 == hostinfo {
+			delete(hm.Hosts, hostinfo.hostId)
+		}
+	}
+	hm.Unlock()
+
+	if l.Level >= logrus.DebugLevel {
+		l.WithField("hostMap", m{"mapName": hm.name, "indexNumber": index, "mapTotalSize": len(hm.Indexes)}).
+			Debug("Hostmap remote index deleted")
+	}
+}
+
 func (hm *HostMap) DeleteHostInfo(hostinfo *HostInfo) {
 	hm.Lock()
+
+	// Check if this same hostId is in the hostmap with a different instance.
+	// This could happen if we have an entry in the pending hostmap with different
+	// index values than the one in the main hostmap.
+	hostinfo2, ok := hm.Hosts[hostinfo.hostId]
+	if ok && hostinfo2 != hostinfo {
+		delete(hm.Hosts, hostinfo2.hostId)
+		delete(hm.Indexes, hostinfo2.localIndexId)
+		delete(hm.RemoteIndexes, hostinfo2.remoteIndexId)
+	}
+
 	delete(hm.Hosts, hostinfo.hostId)
 	if len(hm.Hosts) == 0 {
 		hm.Hosts = map[uint32]*HostInfo{}
@@ -344,36 +362,26 @@ func (hm *HostMap) queryUnsafeRoute(ip uint32) uint32 {
 	}
 }
 
-func (hm *HostMap) CheckHandshakeCompleteIP(vpnIP uint32) bool {
-	hm.RLock()
-	if i, ok := hm.Hosts[vpnIP]; ok {
-		if i == nil {
-			hm.RUnlock()
-			return false
-		}
-		complete := i.HandshakeComplete
-		hm.RUnlock()
-		return complete
+// We already have the hm Lock when this is called, so make sure to not call
+// any other methods that might try to grab it again
+func (hm *HostMap) addHostInfo(hostinfo *HostInfo, f *Interface) {
+	remoteCert := hostinfo.ConnectionState.peerCert
+	ip := ip2int(remoteCert.Details.Ips[0].IP)
 
+	f.lightHouse.AddRemoteAndReset(ip, hostinfo.remote)
+	if f.serveDns {
+		dnsR.Add(remoteCert.Details.Name+".", remoteCert.Details.Ips[0].IP.String())
 	}
-	hm.RUnlock()
-	return false
-}
 
-func (hm *HostMap) CheckHandshakeCompleteIndex(index uint32) bool {
-	hm.RLock()
-	if i, ok := hm.Indexes[index]; ok {
-		if i == nil {
-			hm.RUnlock()
-			return false
-		}
-		complete := i.HandshakeComplete
-		hm.RUnlock()
-		return complete
+	hm.Hosts[hostinfo.hostId] = hostinfo
+	hm.Indexes[hostinfo.localIndexId] = hostinfo
+	hm.RemoteIndexes[hostinfo.remoteIndexId] = hostinfo
 
+	if l.Level >= logrus.DebugLevel {
+		l.WithField("hostMap", m{"mapName": hm.name, "vpnIp": IntIp(hostinfo.hostId), "mapTotalSize": len(hm.Hosts),
+			"hostinfo": m{"existing": true, "localIndexId": hostinfo.localIndexId, "hostId": IntIp(hostinfo.hostId)}}).
+			Debug("Hostmap vpnIp added")
 	}
-	hm.RUnlock()
-	return false
 }
 
 func (hm *HostMap) ClearRemotes(vpnIP uint32) {
@@ -463,8 +471,7 @@ func (i *HostInfo) TryPromoteBest(preferredRanges []*net.IPNet, ifce *Interface)
 		return
 	}
 
-	i.promoteCounter++
-	if i.promoteCounter%PromoteEvery == 0 {
+	if atomic.AddUint32(&i.promoteCounter, 1)&PromoteEvery == 0 {
 		// return early if we are already on a preferred remote
 		rIP := udp2ip(i.remote)
 		for _, l := range preferredRanges {
@@ -565,10 +572,12 @@ func (i *HostInfo) cachePacket(t NebulaMessageType, st NebulaMessageSubType, pac
 		copy(tempPacket, packet)
 		//l.WithField("trace", string(debug.Stack())).Error("Caching packet", tempPacket)
 		i.packetStore = append(i.packetStore, &cachedPacket{t, st, f, tempPacket})
-		i.logger().
-			WithField("length", len(i.packetStore)).
-			WithField("stored", true).
-			Debugf("Packet store")
+		if l.Level >= logrus.DebugLevel {
+			i.logger().
+				WithField("length", len(i.packetStore)).
+				WithField("stored", true).
+				Debugf("Packet store")
+		}
 
 	} else if l.Level >= logrus.DebugLevel {
 		i.logger().
@@ -588,7 +597,7 @@ func (i *HostInfo) handshakeComplete() {
 	i.HandshakeComplete = true
 	//TODO: this should be managed by the handshake state machine to set it based on how many handshake were seen.
 	// Clamping it to 2 gets us out of the woods for now
-	*i.ConnectionState.messageCounter = 2
+	atomic.StoreUint64(&i.ConnectionState.atomicMessageCounter, 2)
 	i.logger().Debugf("Sending %d stored packets", len(i.packetStore))
 	nb := make([]byte, 12, 12)
 	out := make([]byte, mtu)

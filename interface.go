@@ -40,6 +40,8 @@ type InterfaceConfig struct {
 	routines                int
 	MessageMetrics          *MessageMetrics
 	version                 string
+
+	ConntrackCacheTimeout time.Duration
 }
 
 type Interface struct {
@@ -59,7 +61,12 @@ type Interface struct {
 	dropMulticast      bool
 	udpBatchSize       int
 	routines           int
-	version            string
+
+	// rebindCount is used to decide if an active tunnel should trigger a punch notification through a lighthouse
+	rebindCount int8
+	version     string
+
+	conntrackCacheTimeout time.Duration
 
 	writers []*udpConn
 	readers []io.ReadWriteCloser
@@ -102,6 +109,8 @@ func NewInterface(c *InterfaceConfig) (*Interface, error) {
 		writers:            make([]*udpConn, c.routines),
 		readers:            make([]io.ReadWriteCloser, c.routines),
 
+		conntrackCacheTimeout: c.ConntrackCacheTimeout,
+
 		metricHandshakes: metrics.GetOrRegisterHistogram("handshakes", nil, metrics.NewExpDecaySample(1028, 0.015)),
 		messageMetrics:   c.MessageMetrics,
 	}
@@ -125,12 +134,7 @@ func (f *Interface) run() {
 
 	metrics.GetOrRegisterGauge("routines", nil).Update(int64(f.routines))
 
-	// Launch n queues to read packets from udp
-	for i := 0; i < f.routines; i++ {
-		go f.listenOut(i)
-	}
-
-	// Launch n queues to read packets from tun dev
+	// Prepare n tun queues
 	var reader io.ReadWriteCloser = f.inside
 	for i := 0; i < f.routines; i++ {
 		if i > 0 {
@@ -140,11 +144,20 @@ func (f *Interface) run() {
 			}
 		}
 		f.readers[i] = reader
-		go f.listenIn(reader, i)
 	}
 
 	if err := f.inside.Activate(); err != nil {
 		l.Fatal(err)
+	}
+
+	// Launch n queues to read packets from udp
+	for i := 0; i < f.routines; i++ {
+		go f.listenOut(i)
+	}
+
+	// Launch n queues to read packets from tun dev
+	for i := 0; i < f.routines; i++ {
+		go f.listenIn(f.readers[i], i)
 	}
 }
 
@@ -169,6 +182,8 @@ func (f *Interface) listenIn(reader io.ReadWriteCloser, i int) {
 	fwPacket := &FirewallPacket{}
 	nb := make([]byte, 12, 12)
 
+	conntrackCache := NewConntrackCacheTicker(f.conntrackCacheTimeout)
+
 	for {
 		n, err := reader.Read(packet)
 		if err != nil {
@@ -177,7 +192,7 @@ func (f *Interface) listenIn(reader io.ReadWriteCloser, i int) {
 			os.Exit(2)
 		}
 
-		f.consumeInsidePacket(packet[:n], fwPacket, nb, out, i)
+		f.consumeInsidePacket(packet[:n], fwPacket, nb, out, i, conntrackCache.Get())
 	}
 }
 
@@ -264,8 +279,13 @@ func (f *Interface) reloadFirewall(c *Config) {
 
 func (f *Interface) emitStats(i time.Duration) {
 	ticker := time.NewTicker(i)
+
+	udpStats := NewUDPStatsEmitter(f.writers)
+
 	for range ticker.C {
 		f.firewall.EmitStats()
 		f.handshakeManager.EmitStats()
+
+		udpStats()
 	}
 }

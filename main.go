@@ -117,13 +117,25 @@ func Main(config *Config, configTest bool, buildVersion string, logger *logrus.L
 		}
 	}
 
+	// EXPERIMENTAL
+	// Intentionally not documented yet while we do more testing and determine
+	// a good default value.
+	conntrackCacheTimeout := config.GetDuration("firewall.conntrack.routine_cache_timeout", 0)
+	if routines > 1 && !config.IsSet("firewall.conntrack.routine_cache_timeout") {
+		// Use a different default if we are running with multiple routines
+		conntrackCacheTimeout = 1 * time.Second
+	}
+	if conntrackCacheTimeout > 0 {
+		l.WithField("duration", conntrackCacheTimeout).Info("Using routine-local conntrack cache")
+	}
+
 	var tun Inside
 	if !configTest {
 		config.CatchHUP()
 
 		switch {
 		case config.GetBool("tun.disabled", false):
-			tun = newDisabledTun(tunCidr, l)
+			tun = newDisabledTun(tunCidr, config.GetInt("tun.tx_queue", 500), config.GetBool("stats.message_metrics", false), l)
 		case tunFd != nil:
 			tun, err = newTunFromFd(
 				*tunFd,
@@ -232,6 +244,11 @@ func Main(config *Config, configTest bool, buildVersion string, logger *logrus.L
 
 	amLighthouse := config.GetBool("lighthouse.am_lighthouse", false)
 
+	// fatal if am_lighthouse is enabled but we are using an ephemeral port
+	if amLighthouse && (config.GetInt("listen.port", 0) == 0) {
+		return nil, NewContextualError("lighthouse.am_lighthouse enabled on node but no port number is set in config", nil, nil)
+	}
+
 	// warn if am_lighthouse is enabled but upstream lighthouses exists
 	rawLighthouseHosts := config.GetStringSlice("lighthouse.hosts", []string{})
 	if amLighthouse && len(rawLighthouseHosts) != 0 {
@@ -256,7 +273,7 @@ func Main(config *Config, configTest bool, buildVersion string, logger *logrus.L
 		lighthouseHosts,
 		//TODO: change to a duration
 		config.GetInt("lighthouse.interval", 10),
-		port,
+		uint32(port),
 		udpConns[0],
 		punchy.Respond,
 		punchy.Delay,
@@ -359,6 +376,8 @@ func Main(config *Config, configTest bool, buildVersion string, logger *logrus.L
 		routines:                routines,
 		MessageMetrics:          messageMetrics,
 		version:                 buildVersion,
+
+		ConntrackCacheTimeout: conntrackCacheTimeout,
 	}
 
 	switch ifConfig.Cipher {

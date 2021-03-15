@@ -17,7 +17,7 @@ const (
 	minFwPacketLen = 4
 )
 
-func (f *Interface) readOutsidePackets(addr *udpAddr, out []byte, packet []byte, header *Header, fwPacket *FirewallPacket, lhh *LightHouseHandler, nb []byte, q int) {
+func (f *Interface) readOutsidePackets(addr *udpAddr, out []byte, packet []byte, header *Header, fwPacket *FirewallPacket, lhh *LightHouseHandler, nb []byte, q int, localCache ConntrackCache) {
 	err := header.Parse(packet)
 	if err != nil {
 		// TODO: best if we return this and let caller log
@@ -45,7 +45,7 @@ func (f *Interface) readOutsidePackets(addr *udpAddr, out []byte, packet []byte,
 			return
 		}
 
-		f.decryptToTun(hostinfo, header.MessageCounter, out, packet, fwPacket, nb, q)
+		f.decryptToTun(hostinfo, header.MessageCounter, out, packet, fwPacket, nb, q, localCache)
 
 		// Fallthrough to the bottom to record incoming traffic
 
@@ -106,7 +106,6 @@ func (f *Interface) readOutsidePackets(addr *udpAddr, out []byte, packet []byte,
 
 	case recvError:
 		f.messageMetrics.Rx(header.Type, header.Subtype, 1)
-		// TODO: Remove this with recv_error deprecation
 		f.handleRecvError(addr, header)
 		return
 
@@ -147,10 +146,10 @@ func (f *Interface) handleHostRoaming(hostinfo *HostInfo, addr *udpAddr) {
 			hostinfo.logger().WithField("newAddr", addr).Debug("lighthouse.remote_allow_list denied roaming")
 			return
 		}
-		if !hostinfo.lastRoam.IsZero() && addr.Equals(hostinfo.lastRoamRemote) && time.Since(hostinfo.lastRoam) < RoamingSupressSeconds*time.Second {
+		if !hostinfo.lastRoam.IsZero() && addr.Equals(hostinfo.lastRoamRemote) && time.Since(hostinfo.lastRoam) < RoamingSuppressSeconds*time.Second {
 			if l.Level >= logrus.DebugLevel {
 				hostinfo.logger().WithField("udpAddr", hostinfo.remote).WithField("newAddr", addr).
-					Debugf("Supressing roam back to previous remote for %d seconds", RoamingSupressSeconds)
+					Debugf("Suppressing roam back to previous remote for %d seconds", RoamingSuppressSeconds)
 			}
 			return
 		}
@@ -257,7 +256,7 @@ func (f *Interface) decrypt(hostinfo *HostInfo, mc uint64, out []byte, packet []
 	return out, nil
 }
 
-func (f *Interface) decryptToTun(hostinfo *HostInfo, messageCounter uint64, out []byte, packet []byte, fwPacket *FirewallPacket, nb []byte, q int) {
+func (f *Interface) decryptToTun(hostinfo *HostInfo, messageCounter uint64, out []byte, packet []byte, fwPacket *FirewallPacket, nb []byte, q int, localCache ConntrackCache) {
 	var err error
 
 	out, err = hostinfo.ConnectionState.dKey.DecryptDanger(out, packet[:HeaderLen], packet[HeaderLen:], messageCounter, nb)
@@ -281,7 +280,7 @@ func (f *Interface) decryptToTun(hostinfo *HostInfo, messageCounter uint64, out 
 		return
 	}
 
-	dropReason := f.firewall.Drop(out, *fwPacket, true, hostinfo, trustedCAs)
+	dropReason := f.firewall.Drop(out, *fwPacket, true, hostinfo, trustedCAs, localCache)
 	if dropReason != nil {
 		if l.Level >= logrus.DebugLevel {
 			hostinfo.logger().WithField("fwPacket", fwPacket).
@@ -312,19 +311,23 @@ func (f *Interface) sendRecvError(endpoint *udpAddr, index uint32) {
 }
 
 func (f *Interface) handleRecvError(addr *udpAddr, h *Header) {
-	// This flag is to stop caring about recv_error from old versions
-	// This should go away when the old version is gone from prod
 	if l.Level >= logrus.DebugLevel {
 		l.WithField("index", h.RemoteIndex).
 			WithField("udpAddr", addr).
 			Debug("Recv error received")
 	}
 
+	// First, clean up in the pending hostmap
+	f.handshakeManager.pendingHostMap.DeleteReverseIndex(h.RemoteIndex)
+
 	hostinfo, err := f.hostMap.QueryReverseIndex(h.RemoteIndex)
 	if err != nil {
 		l.Debugln(err, ": ", h.RemoteIndex)
 		return
 	}
+
+	hostinfo.Lock()
+	defer hostinfo.Unlock()
 
 	if !hostinfo.RecvErrorExceeded() {
 		return
