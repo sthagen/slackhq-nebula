@@ -16,6 +16,21 @@ type UdpPacket struct {
 	Data     []byte
 }
 
+func (u *UdpPacket) Copy() *UdpPacket {
+	n := &UdpPacket{
+		ToIp:     make(net.IP, len(u.ToIp)),
+		ToPort:   u.ToPort,
+		FromIp:   make(net.IP, len(u.FromIp)),
+		FromPort: u.FromPort,
+		Data:     make([]byte, len(u.Data)),
+	}
+
+	copy(n.ToIp, u.ToIp)
+	copy(n.FromIp, u.FromIp)
+	copy(n.Data, u.Data)
+	return n
+}
+
 type udpConn struct {
 	addr *udpAddr
 
@@ -38,6 +53,7 @@ func NewListener(l *logrus.Logger, ip string, port int, _ bool) (*udpConn, error
 // this is an encrypted packet or a handshake message in most cases
 // packets were transmitted from another nebula node, you can send them with Tun.Send
 func (u *udpConn) Send(packet *UdpPacket) {
+	u.l.Infof("UDP injecting packet %+v", packet)
 	u.rxPackets <- packet
 }
 
@@ -71,8 +87,8 @@ func (u *udpConn) WriteTo(b []byte, addr *udpAddr) error {
 	}
 
 	copy(p.Data, b)
-	copy(p.ToIp, addr.IP)
-	copy(p.FromIp, u.addr.IP)
+	copy(p.ToIp, addr.IP.To16())
+	copy(p.FromIp, u.addr.IP.To16())
 
 	u.txPackets <- p
 	return nil

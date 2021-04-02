@@ -266,7 +266,7 @@ func Main(config *Config, configTest bool, buildVersion string, logger *logrus.L
 	lightHouse := NewLightHouse(
 		l,
 		amLighthouse,
-		ip2int(tunCidr.IP),
+		tunCidr,
 		lighthouseHosts,
 		//TODO: change to a duration
 		config.GetInt("lighthouse.interval", 10),
@@ -299,19 +299,17 @@ func Main(config *Config, configTest bool, buildVersion string, logger *logrus.L
 		if ok {
 			for _, v := range vals {
 				ip, port, err := parseIPAndPort(fmt.Sprintf("%v", v))
-				if err == nil {
-					lightHouse.AddRemote(ip2int(vpnIp), NewUDPAddr(ip, port), true)
-				} else {
+				if err != nil {
 					return nil, NewContextualError("Static host address could not be parsed", m{"vpnIp": vpnIp}, err)
 				}
+				lightHouse.AddRemote(ip2int(vpnIp), NewUDPAddr(ip, port), true)
 			}
 		} else {
 			ip, port, err := parseIPAndPort(fmt.Sprintf("%v", v))
-			if err == nil {
-				lightHouse.AddRemote(ip2int(vpnIp), NewUDPAddr(ip, port), true)
-			} else {
+			if err != nil {
 				return nil, NewContextualError("Static host address could not be parsed", m{"vpnIp": vpnIp}, err)
 			}
+			lightHouse.AddRemote(ip2int(vpnIp), NewUDPAddr(ip, port), true)
 		}
 	}
 

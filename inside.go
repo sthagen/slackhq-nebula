@@ -20,7 +20,7 @@ func (f *Interface) consumeInsidePacket(packet []byte, fwPacket *FirewallPacket,
 	}
 
 	// Ignore packets from self to self
-	if fwPacket.RemoteIP == f.lightHouse.myIp {
+	if fwPacket.RemoteIP == f.myVpnIp {
 		return
 	}
 
@@ -215,9 +215,11 @@ func (f *Interface) SendMessageToAll(t NebulaMessageType, st NebulaMessageSubTyp
 }
 
 func (f *Interface) sendMessageToAll(t NebulaMessageType, st NebulaMessageSubType, hostInfo *HostInfo, p, nb, b []byte) {
-	for _, r := range hostInfo.RemoteUDPAddrs() {
+	hostInfo.RLock()
+	for _, r := range hostInfo.Remotes {
 		f.send(t, st, hostInfo.ConnectionState, hostInfo, r, p, nb, b)
 	}
+	hostInfo.RUnlock()
 }
 
 func (f *Interface) send(t NebulaMessageType, st NebulaMessageSubType, ci *ConnectionState, hostinfo *HostInfo, remote *udpAddr, p, nb, out []byte) {
@@ -245,7 +247,7 @@ func (f *Interface) sendNoMetrics(t NebulaMessageType, st NebulaMessageSubType, 
 	if hostinfo.lastRebindCount != f.rebindCount {
 		//NOTE: there is an update hole if a tunnel isn't used and exactly 256 rebinds occur before the tunnel is
 		// finally used again. This tunnel would eventually be torn down and recreated if this action didn't help.
-		f.lightHouse.Query(hostinfo.hostId, f)
+		f.lightHouse.QueryServer(hostinfo.hostId, f)
 		hostinfo.lastRebindCount = f.rebindCount
 		if f.l.Level >= logrus.DebugLevel {
 			f.l.WithField("vpnIp", hostinfo.hostId).Debug("Lighthouse update triggered for punch due to rebind counter")
