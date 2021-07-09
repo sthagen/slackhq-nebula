@@ -59,6 +59,11 @@ type HostInfo struct {
 	// with a handshake
 	lastRebindCount int8
 
+	// lastHandshakeTime records the time the remote side told us about at the stage when the handshake was completed locally
+	// Stage 1 packet will contain it if I am a responder, stage 2 packet if I am an initiator
+	// This is used to avoid an attack where a handshake packet is replayed after some time
+	lastHandshakeTime uint64
+
 	lastRoam       time.Time
 	lastRoamRemote *udpAddr
 }
@@ -71,6 +76,11 @@ type cachedPacket struct {
 }
 
 type packetCallback func(t NebulaMessageType, st NebulaMessageSubType, h *HostInfo, p, nb, out []byte)
+
+type cachedPacketMetrics struct {
+	sent    metrics.Counter
+	dropped metrics.Counter
+}
 
 func NewHostMap(l *logrus.Logger, name string, vpnCIDR *net.IPNet, preferredRanges []*net.IPNet) *HostMap {
 	h := map[uint32]*HostInfo{}
@@ -303,24 +313,17 @@ func (hm *HostMap) PromoteBestQueryVpnIP(vpnIp uint32, ifce *Interface) (*HostIn
 func (hm *HostMap) queryVpnIP(vpnIp uint32, promoteIfce *Interface) (*HostInfo, error) {
 	hm.RLock()
 	if h, ok := hm.Hosts[vpnIp]; ok {
+		hm.RUnlock()
 		// Do not attempt promotion if you are a lighthouse
 		if promoteIfce != nil && !promoteIfce.lightHouse.amLighthouse {
 			h.TryPromoteBest(hm.preferredRanges, promoteIfce)
 		}
-		hm.RUnlock()
 		return h, nil
 
-	} else {
-		//return &net.UDPAddr{}, nil, errors.New("Unable to find host")
-		hm.RUnlock()
-		/*
-			if lightHouse != nil {
-				lightHouse.Query(vpnIp)
-				return nil, errors.New("Unable to find host")
-			}
-		*/
-		return nil, errors.New("unable to find host")
 	}
+
+	hm.RUnlock()
+	return nil, errors.New("unable to find host")
 }
 
 func (hm *HostMap) queryUnsafeRoute(ip uint32) uint32 {
@@ -405,6 +408,10 @@ func (i *HostInfo) BindConnectionState(cs *ConnectionState) {
 func (i *HostInfo) TryPromoteBest(preferredRanges []*net.IPNet, ifce *Interface) {
 	c := atomic.AddUint32(&i.promoteCounter, 1)
 	if c%PromoteEvery == 0 {
+		// The lock here is currently protecting i.remote access
+		i.RLock()
+		defer i.RUnlock()
+
 		// return early if we are already on a preferred remote
 		rIP := i.remote.IP
 		for _, l := range preferredRanges {
@@ -430,7 +437,7 @@ func (i *HostInfo) TryPromoteBest(preferredRanges []*net.IPNet, ifce *Interface)
 	}
 }
 
-func (i *HostInfo) cachePacket(l *logrus.Logger, t NebulaMessageType, st NebulaMessageSubType, packet []byte, f packetCallback) {
+func (i *HostInfo) cachePacket(l *logrus.Logger, t NebulaMessageType, st NebulaMessageSubType, packet []byte, f packetCallback, m *cachedPacketMetrics) {
 	//TODO: return the error so we can log with more context
 	if len(i.packetStore) < 100 {
 		tempPacket := make([]byte, len(packet))
@@ -445,6 +452,7 @@ func (i *HostInfo) cachePacket(l *logrus.Logger, t NebulaMessageType, st NebulaM
 		}
 
 	} else if l.Level >= logrus.DebugLevel {
+		m.dropped.Inc(1)
 		i.logger(l).
 			WithField("length", len(i.packetStore)).
 			WithField("stored", false).
@@ -453,7 +461,7 @@ func (i *HostInfo) cachePacket(l *logrus.Logger, t NebulaMessageType, st NebulaM
 }
 
 // handshakeComplete will set the connection as ready to communicate, as well as flush any stored packets
-func (i *HostInfo) handshakeComplete(l *logrus.Logger) {
+func (i *HostInfo) handshakeComplete(l *logrus.Logger, m *cachedPacketMetrics) {
 	//TODO: I'm not certain the distinction between handshake complete and ConnectionState being ready matters because:
 	//TODO: HandshakeComplete means send stored packets and ConnectionState.ready means we are ready to send
 	//TODO: if the transition from HandhsakeComplete to ConnectionState.ready happens all within this function they are identical
@@ -474,6 +482,7 @@ func (i *HostInfo) handshakeComplete(l *logrus.Logger) {
 		for _, cp := range i.packetStore {
 			cp.callback(cp.messageType, cp.messageSubType, i, cp.packet, nb, out)
 		}
+		m.sent.Inc(int64(len(i.packetStore)))
 	}
 
 	i.remotes.ResetBlockedRemotes()

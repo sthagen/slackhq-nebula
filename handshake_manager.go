@@ -8,6 +8,7 @@ import (
 	"net"
 	"time"
 
+	"github.com/rcrowley/go-metrics"
 	"github.com/sirupsen/logrus"
 )
 
@@ -41,6 +42,8 @@ type HandshakeManager struct {
 	config                 HandshakeConfig
 	OutboundHandshakeTimer *SystemTimerWheel
 	messageMetrics         *MessageMetrics
+	metricInitiated        metrics.Counter
+	metricTimedOut         metrics.Counter
 	l                      *logrus.Logger
 
 	// can be used to trigger outbound handshake for the given vpnIP
@@ -57,6 +60,8 @@ func NewHandshakeManager(l *logrus.Logger, tunCidr *net.IPNet, preferredRanges [
 		trigger:                make(chan uint32, config.triggerBuffer),
 		OutboundHandshakeTimer: NewSystemTimerWheel(config.tryInterval, hsTimeout(config.retries, config.tryInterval)),
 		messageMetrics:         config.messageMetrics,
+		metricInitiated:        metrics.GetOrRegisterCounter("handshake_manager.initiated", nil),
+		metricTimedOut:         metrics.GetOrRegisterCounter("handshake_manager.timed_out", nil),
 		l:                      l,
 	}
 }
@@ -117,7 +122,7 @@ func (c *HandshakeManager) handleOutbound(vpnIP uint32, f EncWriter, lighthouseT
 			WithField("handshake", m{"stage": 1, "style": "ix_psk0"}).
 			WithField("durationNs", time.Since(hostinfo.handshakeStart).Nanoseconds()).
 			Info("Handshake timed out")
-		//TODO: emit metrics
+		c.metricTimedOut.Inc(1)
 		c.pendingHostMap.DeleteHostInfo(hostinfo)
 		return
 	}
@@ -160,10 +165,13 @@ func (c *HandshakeManager) handleOutbound(vpnIP uint32, f EncWriter, lighthouseT
 		}
 	})
 
-	hostinfo.logger(c.l).WithField("udpAddrs", sentTo).
-		WithField("initiatorIndex", hostinfo.localIndexId).
-		WithField("handshake", m{"stage": 1, "style": "ix_psk0"}).
-		Info("Handshake message sent")
+	// Don't be too noisy or confusing if we fail to send a handshake - if we don't get through we'll eventually log a timeout
+	if len(sentTo) > 0 {
+		hostinfo.logger(c.l).WithField("udpAddrs", sentTo).
+			WithField("initiatorIndex", hostinfo.localIndexId).
+			WithField("handshake", m{"stage": 1, "style": "ix_psk0"}).
+			Info("Handshake message sent")
+	}
 
 	// Increment the counter to increase our delay, linear backoff
 	hostinfo.HandshakeCounter++
@@ -181,6 +189,7 @@ func (c *HandshakeManager) AddVpnIP(vpnIP uint32) *HostInfo {
 	// main receive thread for very long by waiting to add items to the pending map
 	//TODO: what lock?
 	c.OutboundHandshakeTimer.Add(vpnIP, c.config.tryInterval)
+	c.metricInitiated.Inc(1)
 
 	return hostinfo
 }
@@ -199,7 +208,7 @@ var (
 // exact same handshake packet
 //
 // ErrExistingHostInfo if we already have an entry in the hostmap for this
-// VpnIP and overwrite was false.
+// VpnIP and the new handshake was older than the one we currently have
 //
 // ErrLocalIndexCollision if we already have an entry in the main or pending
 // hostmap for the hostinfo.localIndexId.
@@ -217,10 +226,12 @@ func (c *HandshakeManager) CheckAndComplete(hostinfo *HostInfo, handshakePacket 
 			return existingHostInfo, ErrAlreadySeen
 		}
 
-		if !overwrite {
-			// It's a new handshake and we lost the race
+		// Is this a newer handshake?
+		if existingHostInfo.lastHandshakeTime >= hostinfo.lastHandshakeTime {
 			return existingHostInfo, ErrExistingHostInfo
 		}
+
+		existingHostInfo.logger(c.l).Info("Taking new handshake")
 	}
 
 	existingIndex, found := c.mainHostMap.Indexes[hostinfo.localIndexId]
@@ -261,7 +272,6 @@ func (c *HandshakeManager) CheckAndComplete(hostinfo *HostInfo, handshakePacket 
 	}
 
 	if existingHostInfo != nil {
-		hostinfo.logger(c.l).Info("Race lost, taking new handshake")
 		// We are going to overwrite this entry, so remove the old references
 		delete(c.mainHostMap.Hosts, existingHostInfo.hostId)
 		delete(c.mainHostMap.Indexes, existingHostInfo.localIndexId)

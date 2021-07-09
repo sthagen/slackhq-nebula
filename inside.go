@@ -45,7 +45,7 @@ func (f *Interface) consumeInsidePacket(packet []byte, fwPacket *FirewallPacket,
 		// the packet queue.
 		ci.queueLock.Lock()
 		if !ci.ready {
-			hostinfo.cachePacket(f.l, message, 0, packet, f.sendMessageNow)
+			hostinfo.cachePacket(f.l, message, 0, packet, f.sendMessageNow, f.cachedPacketMetrics)
 			ci.queueLock.Unlock()
 			return
 		}
@@ -164,7 +164,7 @@ func (f *Interface) SendMessageToVpnIp(t NebulaMessageType, st NebulaMessageSubT
 		// the packet queue.
 		hostInfo.ConnectionState.queueLock.Lock()
 		if !hostInfo.ConnectionState.ready {
-			hostInfo.cachePacket(f.l, t, st, p, f.sendMessageToVpnIp)
+			hostInfo.cachePacket(f.l, t, st, p, f.sendMessageToVpnIp, f.cachedPacketMetrics)
 			hostInfo.ConnectionState.queueLock.Unlock()
 			return
 		}
@@ -201,7 +201,7 @@ func (f *Interface) sendNoMetrics(t NebulaMessageType, st NebulaMessageSubType, 
 
 	// Query our LH if we haven't since the last time we've been rebound, this will cause the remote to punch against
 	// all our IPs and enable a faster roaming.
-	if hostinfo.lastRebindCount != f.rebindCount {
+	if t != closeTunnel && hostinfo.lastRebindCount != f.rebindCount {
 		//NOTE: there is an update hole if a tunnel isn't used and exactly 256 rebinds occur before the tunnel is
 		// finally used again. This tunnel would eventually be torn down and recreated if this action didn't help.
 		f.lightHouse.QueryServer(hostinfo.hostId, f)

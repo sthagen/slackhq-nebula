@@ -31,7 +31,7 @@ func ixHandshakeStage0(f *Interface, vpnIp uint32, hostinfo *HostInfo) {
 
 	hsProto := &NebulaHandshakeDetails{
 		InitiatorIndex: hostinfo.localIndexId,
-		Time:           uint64(time.Now().Unix()),
+		Time:           uint64(time.Now().UnixNano()),
 		Cert:           ci.certState.rawCertificateNoKey,
 	}
 
@@ -119,11 +119,12 @@ func ixHandshakeStage1(f *Interface, addr *udpAddr, packet []byte, h *Header) {
 	}
 
 	hostinfo := &HostInfo{
-		ConnectionState: ci,
-		localIndexId:    myIndex,
-		remoteIndexId:   hs.Details.InitiatorIndex,
-		hostId:          vpnIP,
-		HandshakePacket: make(map[uint8][]byte, 0),
+		ConnectionState:   ci,
+		localIndexId:      myIndex,
+		remoteIndexId:     hs.Details.InitiatorIndex,
+		hostId:            vpnIP,
+		HandshakePacket:   make(map[uint8][]byte, 0),
+		lastHandshakeTime: hs.Details.Time,
 	}
 
 	hostinfo.Lock()
@@ -138,6 +139,8 @@ func ixHandshakeStage1(f *Interface, addr *udpAddr, packet []byte, h *Header) {
 
 	hs.Details.ResponderIndex = myIndex
 	hs.Details.Cert = ci.certState.rawCertificateNoKey
+	// Update the time in case their clock is way off from ours
+	hs.Details.Time = uint64(time.Now().UnixNano())
 
 	hsBytes, err := proto.Marshal(hs)
 	if err != nil {
@@ -204,18 +207,15 @@ func ixHandshakeStage1(f *Interface, addr *udpAddr, packet []byte, h *Header) {
 			}
 			return
 		case ErrExistingHostInfo:
-			// This means there was an existing tunnel and we didn't win
-			// handshake avoidance
-
-			//TODO: sprinkle the new protobuf stuff in here, send a reply to get the recv_errors flowing
-			//TODO: if not new send a test packet like old
-
+			// This means there was an existing tunnel and this handshake was older than the one we are currently based on
 			f.l.WithField("vpnIp", IntIp(vpnIP)).WithField("udpAddr", addr).
 				WithField("certName", certName).
+				WithField("oldHandshakeTime", existing.lastHandshakeTime).
+				WithField("newHandshakeTime", hostinfo.lastHandshakeTime).
 				WithField("fingerprint", fingerprint).
 				WithField("initiatorIndex", hs.Details.InitiatorIndex).WithField("responderIndex", hs.Details.ResponderIndex).
 				WithField("remoteIndex", h.RemoteIndex).WithField("handshake", m{"stage": 1, "style": "ix_psk0"}).
-				Info("Prevented a handshake race")
+				Info("Handshake too old")
 
 			// Send a test packet to trigger an authenticated tunnel test, this should suss out any lingering tunnel issues
 			f.SendMessageToVpnIp(test, testRequest, vpnIP, []byte(""), make([]byte, 12, 12), make([]byte, mtu))
@@ -268,10 +268,11 @@ func ixHandshakeStage1(f *Interface, addr *udpAddr, packet []byte, h *Header) {
 			WithField("fingerprint", fingerprint).
 			WithField("initiatorIndex", hs.Details.InitiatorIndex).WithField("responderIndex", hs.Details.ResponderIndex).
 			WithField("remoteIndex", h.RemoteIndex).WithField("handshake", m{"stage": 2, "style": "ix_psk0"}).
+			WithField("sentCachedPackets", len(hostinfo.packetStore)).
 			Info("Handshake message sent")
 	}
 
-	hostinfo.handshakeComplete(f.l)
+	hostinfo.handshakeComplete(f.l, f.cachedPacketMetrics)
 
 	return
 }
@@ -391,10 +392,11 @@ func ixHandshakeStage2(f *Interface, addr *udpAddr, hostinfo *HostInfo, packet [
 		WithField("initiatorIndex", hs.Details.InitiatorIndex).WithField("responderIndex", hs.Details.ResponderIndex).
 		WithField("remoteIndex", h.RemoteIndex).WithField("handshake", m{"stage": 2, "style": "ix_psk0"}).
 		WithField("durationNs", duration).
+		WithField("sentCachedPackets", len(hostinfo.packetStore)).
 		Info("Handshake message received")
 
 	hostinfo.remoteIndexId = hs.Details.ResponderIndex
-	hs.Details.Cert = ci.certState.rawCertificateNoKey
+	hostinfo.lastHandshakeTime = hs.Details.Time
 
 	// Store their cert and our symmetric keys
 	ci.peerCert = remoteCert
@@ -410,7 +412,7 @@ func ixHandshakeStage2(f *Interface, addr *udpAddr, hostinfo *HostInfo, packet [
 	// Complete our handshake and update metrics, this will replace any existing tunnels for this vpnIp
 	//TODO: Complete here does not do a race avoidance, it will just take the new tunnel. Is this ok?
 	f.handshakeManager.Complete(hostinfo, f)
-	hostinfo.handshakeComplete(f.l)
+	hostinfo.handshakeComplete(f.l, f.cachedPacketMetrics)
 	f.metricHandshakes.Update(duration)
 
 	return false
