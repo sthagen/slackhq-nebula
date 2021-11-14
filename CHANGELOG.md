@@ -7,9 +7,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.5.0] - 2021-11-11
+
 ### Added
 
 - SSH `print-cert` has a new `-raw` flag to get the PEM representation of a certificate. (#483)
+
+- New build architecture: Linux `riscv64`. (#542)
+
+- New experimental config option `remote_allow_ranges`. (#540)
+
+- New config option `pki.disconnect_invalid` that will tear down tunnels when they become invalid (through expiry or
+  removal of root trust). Default is `false`. Note, this will not currently recognize if a remote has changed
+  certificates since the last handshake. (#370)
+
+- New config option `unsafe_routes.<route>.metric` will set a metric for a specific unsafe route. It's useful if you have
+  more than one identical route and want to prefer one against the other. (#353)
+
+### Changed
+
+- Build against go 1.17. (#553)
+
+- Build with `CGO_ENABLED=0` set, to create more portable binaries. This could
+  have an effect on DNS resolution if you rely on anything non-standard. (#421)
+
+- Windows now uses the [wintun](https://www.wintun.net/) driver which does not require installation. This driver
+  is a large improvement over the TAP driver that was used in previous versions. If you had a previous version
+  of `nebula` running, you will want to disable the tap driver in Control Panel, or uninstall the `tap0901` driver
+  before running this version. (#289)
+
+- Darwin binaries are now universal (works on both amd64 and arm64), signed, and shipped in a notarized zip file.
+  `nebula-darwin.zip` will be the only darwin release artifact. (#571)
+
+- Darwin uses syscalls and AF_ROUTE to configure the routing table, instead of
+  using `/sbin/route`. Setting `tun.dev` is now allowed on Darwin as well, it
+  must be in the format `utun[0-9]+` or it will be ignored. (#163)
+
+### Deprecated
+
+- The `preferred_ranges` option has been supported as a replacement for
+  `local_range` since v1.0.0. It has now been documented and `local_range`
+  has been officially deprecated. (#541)
 
 ### Fixed
 
@@ -20,6 +58,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Signing a certificate with `nebula-cert sign` now verifies that the supplied
   ca-key matches the ca-crt. (#503)
 
+- If `preferred_ranges` (or the deprecated `local_range`) is configured, we
+  will immediately switch to a preferred remote address after the reception of
+  a handshake packet (instead of waiting until 1,000 packets have been sent).
+  (#532)
+
+- A race condition when `punchy.respond` is enabled and ensures the correct
+  vpn ip is sent a punch back response in highly queried node. (#566)
+
+- Fix a rare crash during handshake due to a race condition. (#535)
+
 ## [1.4.0] - 2021-05-11
 
 ### Added
@@ -29,13 +77,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Experimental: Nebula can now do work on more than 2 cpu cores in send and receive paths via
   the new `routines` config option. (#382, #391, #395)
-  
+
 - ICMP ping requests can be responded to when the `tun.disabled` is `true`.
   This is useful so that you can "ping" a lighthouse running in this mode. (#342)
 
 - Run smoke tests via `make smoke-docker`. (#287)
 
-- More reported stats, udp memory use on linux, build version (when using Prometheus), firewall, 
+- More reported stats, udp memory use on linux, build version (when using Prometheus), firewall,
   handshake, and cached packet stats. (#390, #405, #450, #453)
 
 - IPv6 support for the underlay network. (#369)
@@ -48,7 +96,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Example systemd unit file now better arranged startup order when using `sshd`
   and other fixes. (#317, #412, #438)
-  
+
 - Reduced memory utilization/garbage collection. (#320, #323, #340)
 
 - Reduced CPU utilization. (#329)
@@ -258,7 +306,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Initial public release.
 
-[Unreleased]: https://github.com/slackhq/nebula/compare/v1.4.0...HEAD
+[Unreleased]: https://github.com/slackhq/nebula/compare/v1.5.0...HEAD
+[1.5.0]: https://github.com/slackhq/nebula/releases/tag/v1.5.0
 [1.4.0]: https://github.com/slackhq/nebula/releases/tag/v1.4.0
 [1.3.0]: https://github.com/slackhq/nebula/releases/tag/v1.3.0
 [1.2.0]: https://github.com/slackhq/nebula/releases/tag/v1.2.0
