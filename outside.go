@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"github.com/flynn/noise"
-	"github.com/golang/protobuf/proto"
 	"github.com/sirupsen/logrus"
 	"github.com/slackhq/nebula/cert"
 	"github.com/slackhq/nebula/firewall"
@@ -15,6 +14,7 @@ import (
 	"github.com/slackhq/nebula/iputil"
 	"github.com/slackhq/nebula/udp"
 	"golang.org/x/net/ipv4"
+	"google.golang.org/protobuf/proto"
 )
 
 const (
@@ -157,7 +157,7 @@ func (f *Interface) sendCloseTunnel(h *HostInfo) {
 
 func (f *Interface) handleHostRoaming(hostinfo *HostInfo, addr *udp.Addr) {
 	if !hostinfo.remote.Equals(addr) {
-		if !f.lightHouse.remoteAllowList.Allow(hostinfo.vpnIp, addr.IP) {
+		if !f.lightHouse.GetRemoteAllowList().Allow(hostinfo.vpnIp, addr.IP) {
 			hostinfo.logger(f.l).WithField("newAddr", addr).Debug("lighthouse.remote_allow_list denied roaming")
 			return
 		}
