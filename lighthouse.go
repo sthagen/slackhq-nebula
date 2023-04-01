@@ -299,7 +299,7 @@ func (lh *LightHouse) reload(c *config.C, initial bool) error {
 		case false:
 			relaysForMe := []iputil.VpnIp{}
 			for _, v := range c.GetStringSlice("relay.relays", nil) {
-				lh.l.WithField("RelayIP", v).Info("Read relay from config")
+				lh.l.WithField("relay", v).Info("Read relay from config")
 
 				configRIP := net.ParseIP(v)
 				if configRIP != nil {
@@ -965,7 +965,7 @@ func (lhh *LightHouseHandler) handleHostPunchNotification(n *NebulaMeta, vpnIp i
 	if lhh.lh.punchy.GetRespond() {
 		queryVpnIp := iputil.VpnIp(n.Details.VpnIp)
 		go func() {
-			time.Sleep(time.Second * 5)
+			time.Sleep(lhh.lh.punchy.GetRespondDelay())
 			if lhh.l.Level >= logrus.DebugLevel {
 				lhh.l.Debugf("Sending a nebula test packet to vpn ip %s", queryVpnIp)
 			}

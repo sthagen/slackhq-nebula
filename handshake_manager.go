@@ -203,7 +203,7 @@ func (c *HandshakeManager) handleOutbound(vpnIp iputil.VpnIp, f udp.EncWriter, l
 	}
 
 	if c.config.useRelays && len(hostinfo.remotes.relays) > 0 {
-		hostinfo.logger(c.l).WithField("relayIps", hostinfo.remotes.relays).Info("Attempt to relay through hosts")
+		hostinfo.logger(c.l).WithField("relays", hostinfo.remotes.relays).Info("Attempt to relay through hosts")
 		// Send a RelayRequest to all known Relay IP's
 		for _, relay := range hostinfo.remotes.relays {
 			// Don't relay to myself, and don't relay through the host I'm trying to connect to
@@ -212,7 +212,7 @@ func (c *HandshakeManager) handleOutbound(vpnIp iputil.VpnIp, f udp.EncWriter, l
 			}
 			relayHostInfo, err := c.mainHostMap.QueryVpnIp(*relay)
 			if err != nil || relayHostInfo.remote == nil {
-				hostinfo.logger(c.l).WithError(err).WithField("relay", relay.String()).Info("Establish tunnel to relay target.")
+				hostinfo.logger(c.l).WithError(err).WithField("relay", relay.String()).Info("Establish tunnel to relay target")
 				f.Handshake(*relay)
 				continue
 			}
@@ -238,12 +238,18 @@ func (c *HandshakeManager) handleOutbound(vpnIp iputil.VpnIp, f udp.EncWriter, l
 							Error("Failed to marshal Control message to create relay")
 					} else {
 						f.SendMessageToVpnIp(header.Control, 0, *relay, msg, make([]byte, 12), make([]byte, mtu))
+						c.l.WithFields(logrus.Fields{
+							"relayFrom":           c.lightHouse.myVpnIp,
+							"relayTo":             vpnIp,
+							"initiatorRelayIndex": existingRelay.LocalIndex,
+							"relay":               *relay}).
+							Info("send CreateRelayRequest")
 					}
 				default:
 					hostinfo.logger(c.l).
 						WithField("vpnIp", vpnIp).
 						WithField("state", existingRelay.State).
-						WithField("relayVpnIp", relayHostInfo.vpnIp).
+						WithField("relay", relayHostInfo.vpnIp).
 						Errorf("Relay unexpected state")
 				}
 			} else {
@@ -267,6 +273,12 @@ func (c *HandshakeManager) handleOutbound(vpnIp iputil.VpnIp, f udp.EncWriter, l
 							Error("Failed to marshal Control message to create relay")
 					} else {
 						f.SendMessageToVpnIp(header.Control, 0, *relay, msg, make([]byte, 12), make([]byte, mtu))
+						c.l.WithFields(logrus.Fields{
+							"relayFrom":           c.lightHouse.myVpnIp,
+							"relayTo":             vpnIp,
+							"initiatorRelayIndex": idx,
+							"relay":               *relay}).
+							Info("send CreateRelayRequest")
 					}
 				}
 			}
@@ -333,7 +345,7 @@ func (c *HandshakeManager) CheckAndComplete(hostinfo *HostInfo, handshakePacket 
 		}
 
 		// Is this a newer handshake?
-		if existingHostInfo.lastHandshakeTime >= hostinfo.lastHandshakeTime {
+		if existingHostInfo.lastHandshakeTime >= hostinfo.lastHandshakeTime && !existingHostInfo.ConnectionState.initiator {
 			return existingHostInfo, ErrExistingHostInfo
 		}
 
@@ -368,7 +380,7 @@ func (c *HandshakeManager) CheckAndComplete(hostinfo *HostInfo, handshakePacket 
 // Complete is a simpler version of CheckAndComplete when we already know we
 // won't have a localIndexId collision because we already have an entry in the
 // pendingHostMap. An existing hostinfo is returned if there was one.
-func (c *HandshakeManager) Complete(hostinfo *HostInfo, f *Interface) *HostInfo {
+func (c *HandshakeManager) Complete(hostinfo *HostInfo, f *Interface) {
 	c.pendingHostMap.Lock()
 	defer c.pendingHostMap.Unlock()
 	c.mainHostMap.Lock()
@@ -383,11 +395,9 @@ func (c *HandshakeManager) Complete(hostinfo *HostInfo, f *Interface) *HostInfo 
 			Info("New host shadows existing host remoteIndex")
 	}
 
-	existingHostInfo := c.mainHostMap.Hosts[hostinfo.vpnIp]
 	// We need to remove from the pending hostmap first to avoid undoing work when after to the main hostmap.
 	c.pendingHostMap.unlockedDeleteHostInfo(hostinfo)
 	c.mainHostMap.unlockedAddHostInfo(hostinfo, f)
-	return existingHostInfo
 }
 
 // AddIndexHostInfo generates a unique localIndexId for this HostInfo
