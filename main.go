@@ -212,18 +212,13 @@ func Main(c *config.C, configTest bool, buildVersion string, logger *logrus.Logg
 		}
 	}
 
-	hostMap := NewHostMap(l, "main", tunCidr, preferredRanges)
+	hostMap := NewHostMap(l, tunCidr, preferredRanges)
 	hostMap.metricsEnabled = c.GetBool("stats.message_metrics", false)
 
 	l.
 		WithField("network", hostMap.vpnCIDR.String()).
 		WithField("preferredRanges", hostMap.preferredRanges).
 		Info("Main HostMap created")
-
-	/*
-		config.SetDefault("promoter.interval", 10)
-		go hostMap.Promoter(config.GetInt("promoter.interval"))
-	*/
 
 	punchy := NewPunchyFromConfig(l, c)
 	lightHouse, err := NewLightHouseFromConfig(ctx, l, c, tunCidr, udpConns[0], punchy)
@@ -255,10 +250,6 @@ func Main(c *config.C, configTest bool, buildVersion string, logger *logrus.Logg
 	handshakeManager := NewHandshakeManager(l, tunCidr, preferredRanges, hostMap, lightHouse, udpConns[0], handshakeConfig)
 	lightHouse.handshakeTrigger = handshakeManager.trigger
 
-	//TODO: These will be reused for psk
-	//handshakeMACKey := config.GetString("handshake_mac.key", "")
-	//handshakeAcceptedMACKeys := config.GetStringSlice("handshake_mac.accepted_keys", []string{})
-
 	serveDns := false
 	if c.GetBool("lighthouse.serve_dns", false) {
 		if c.GetBool("lighthouse.am_lighthouse", false) {
@@ -270,6 +261,7 @@ func Main(c *config.C, configTest bool, buildVersion string, logger *logrus.Logg
 
 	checkInterval := c.GetInt("timers.connection_alive_interval", 5)
 	pendingDeletionInterval := c.GetInt("timers.pending_deletion_interval", 10)
+
 	ifConfig := &InterfaceConfig{
 		HostMap:                 hostMap,
 		Inside:                  tun,
@@ -282,6 +274,9 @@ func Main(c *config.C, configTest bool, buildVersion string, logger *logrus.Logg
 		lightHouse:              lightHouse,
 		checkInterval:           time.Second * time.Duration(checkInterval),
 		pendingDeletionInterval: time.Second * time.Duration(pendingDeletionInterval),
+		tryPromoteEvery:         c.GetUint32("counters.try_promote", defaultPromoteEvery),
+		reQueryEvery:            c.GetUint32("counters.requery_every_packets", defaultReQueryEvery),
+		reQueryWait:             c.GetDuration("timers.requery_wait_duration", defaultReQueryWait),
 		DropLocalBroadcast:      c.GetBool("tun.drop_local_broadcast", false),
 		DropMulticast:           c.GetBool("tun.drop_multicast", false),
 		routines:                routines,
@@ -315,13 +310,12 @@ func Main(c *config.C, configTest bool, buildVersion string, logger *logrus.Logg
 		// TODO: Better way to attach these, probably want a new interface in InterfaceConfig
 		// I don't want to make this initial commit too far-reaching though
 		ifce.writers = udpConns
+		lightHouse.ifce = ifce
 
 		ifce.RegisterConfigChangeCallbacks(c)
-
 		ifce.reloadSendRecvError(c)
 
 		go handshakeManager.Run(ctx, ifce)
-		go lightHouse.LhUpdateWorker(ctx, ifce)
 	}
 
 	// TODO - stats third-party modules start uncancellable goroutines. Update those libs to accept
@@ -339,7 +333,7 @@ func Main(c *config.C, configTest bool, buildVersion string, logger *logrus.Logg
 	//TODO: check if we _should_ be emitting stats
 	go ifce.emitStats(ctx, c.GetDuration("stats.interval", time.Second*10))
 
-	attachCommands(l, c, ssh, hostMap, handshakeManager.pendingHostMap, lightHouse, ifce)
+	attachCommands(l, c, ssh, ifce)
 
 	// Start DNS server last to allow using the nebula IP as lighthouse.dns.host
 	var dnsStart func()
@@ -348,5 +342,13 @@ func Main(c *config.C, configTest bool, buildVersion string, logger *logrus.Logg
 		dnsStart = dnsMain(l, hostMap, c)
 	}
 
-	return &Control{ifce, l, cancel, sshStart, statsStart, dnsStart}, nil
+	return &Control{
+		ifce,
+		l,
+		cancel,
+		sshStart,
+		statsStart,
+		dnsStart,
+		lightHouse.StartUpdateWorker,
+	}, nil
 }
