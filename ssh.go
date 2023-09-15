@@ -607,11 +607,10 @@ func sshCreateTunnel(ifce *Interface, fs interface{}, a []string, w sshd.StringW
 		}
 	}
 
-	hostInfo = ifce.handshakeManager.AddVpnIp(vpnIp, ifce.initHostInfo)
+	hostInfo = ifce.handshakeManager.StartHandshake(vpnIp, nil)
 	if addr != nil {
 		hostInfo.SetRemote(addr)
 	}
-	ifce.getOrHandshake(vpnIp)
 
 	return w.WriteLine("Created")
 }
@@ -754,7 +753,7 @@ func sshPrintCert(ifce *Interface, fs interface{}, a []string, w sshd.StringWrit
 		return nil
 	}
 
-	cert := ifce.certState.Load().certificate
+	cert := ifce.pki.GetCertState().Certificate
 	if len(a) > 0 {
 		parsedIp := net.ParseIP(a[0])
 		if parsedIp == nil {
