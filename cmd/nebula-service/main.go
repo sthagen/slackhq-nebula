@@ -50,9 +50,15 @@ func main() {
 		os.Exit(0)
 	}
 
+	l := logrus.New()
+	l.Out = os.Stdout
+
 	if *serviceFlag != "" {
-		doService(configPath, configTest, Build, serviceFlag)
-		os.Exit(1)
+		if err := doService(configPath, configTest, Build, serviceFlag); err != nil {
+			l.WithError(err).Error("Service command failed")
+			os.Exit(1)
+		}
+		return
 	}
 
 	if *configPath == "" {
@@ -60,9 +66,6 @@ func main() {
 		flag.Usage()
 		os.Exit(1)
 	}
-
-	l := logrus.New()
-	l.Out = os.Stdout
 
 	c := config.NewC(l)
 	err := c.Load(*configPath)
@@ -78,8 +81,20 @@ func main() {
 	}
 
 	if !*configTest {
-		ctrl.Start()
-		ctrl.ShutdownBlock()
+		wait, err := ctrl.Start()
+		if err != nil {
+			util.LogWithContextIfNeeded("Error while running", err, l)
+			os.Exit(1)
+		}
+
+		go ctrl.ShutdownBlock()
+
+		if err := wait(); err != nil {
+			l.WithError(err).Error("Nebula stopped due to fatal error")
+			os.Exit(2)
+		}
+
+		l.Info("Goodbye")
 	}
 
 	os.Exit(0)
