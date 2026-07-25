@@ -295,7 +295,13 @@ func (hm *HandshakeManager) handleOutbound(vpnIp netip.Addr, lighthouseTriggered
 		hm.messageMetrics.Tx(header.Handshake, hh.machine.Subtype(), 1)
 		err := hm.outside.WriteTo(stage0, addr)
 		if err != nil {
-			hostinfo.logger(hm.l).Error("Failed to send handshake message",
+			// These repeat every attempt, so match the success log below and only shout when the remotes changed
+			level := slog.LevelDebug
+			if remotesHaveChanged {
+				level = slog.LevelError
+			}
+
+			hostinfo.logger(hm.l).Log(context.Background(), level, "Failed to send handshake message",
 				"udpAddr", addr,
 				"initiatorIndex", hostinfo.localIndexId,
 				"handshake", hsFields,
@@ -529,7 +535,9 @@ func (hm *HandshakeManager) DeleteHostInfo(hostinfo *HostInfo) {
 
 func (hm *HandshakeManager) unlockedDeleteHostInfo(hostinfo *HostInfo) {
 	for _, addr := range hostinfo.vpnAddrs {
-		delete(hm.vpnIps, addr)
+		if cur, ok := hm.vpnIps[addr]; ok && cur.hostinfo == hostinfo {
+			delete(hm.vpnIps, addr)
+		}
 	}
 
 	if len(hm.vpnIps) == 0 {
@@ -1077,7 +1085,7 @@ func (hm *HandshakeManager) sendHandshakeResponse(via ViaSender, msg []byte, hos
 		hostinfo.relayState.InsertRelayTo(via.relayHI.vpnAddrs[0])
 		// We received a valid handshake on this relay, so make sure the relay
 		// state reflects that, in case it had been marked Disestablished.
-		via.relayHI.relayState.UpdateRelayForByIdxState(via.remoteIdx, Established)
+		via.relayHI.relayState.UpdateRelayForByIdxState(via.relay.LocalIndex, Established)
 		f.SendVia(via.relayHI, via.relay, msg, make([]byte, 12), make([]byte, mtu), false)
 		f.l.Info("Handshake message sent", append(logFields, "relay", via.relayHI.vpnAddrs[0])...)
 	}
