@@ -221,7 +221,7 @@ func newTunGeneric(c *config.C, l *slog.Logger, fd int, vnetHdr bool, offloadFla
 		vnetHdr:                   vnetHdr,
 		offloadFlags:              offloadFlags,
 		vpnNetworks:               vpnNetworks,
-		TXQueueLen:                c.GetInt("tun.tx_queue", 500),
+		TXQueueLen:                c.GetInt("tun.tx_queue", 5000),
 		useSystemRoutes:           c.GetBool("tun.use_system_route_table", false),
 		useSystemRoutesBufferSize: c.GetInt("tun.use_system_route_table_buffer_size", 0),
 		routesFromSystem:          map[netip.Prefix]routing.Gateways{},
@@ -244,13 +244,22 @@ func newTunGeneric(c *config.C, l *slog.Logger, fd int, vnetHdr bool, offloadFla
 }
 
 func (t *tun) reload(c *config.C, initial bool) error {
-	routeChange, routes, err := getAllRoutesFromConfig(c, t.vpnNetworks, initial)
+	routeChange, routes, err := getAllRoutesFromConfig(t.l, c, t.vpnNetworks, initial)
 	if err != nil {
 		return err
 	}
 
 	if !initial && !routeChange && !c.HasChanged("tun.mtu") {
 		return nil
+	}
+
+	// Only the mtu changed. The routes are the same, parse them again so the ones without their own mtu pick up the
+	// new default. Without this an mtu change would remove them all
+	if !routeChange {
+		_, routes, err = getAllRoutesFromConfig(t.l, c, t.vpnNetworks, true)
+		if err != nil {
+			return err
+		}
 	}
 
 	routeTree, err := makeRouteTree(t.l, routes, true)
@@ -267,14 +276,14 @@ func (t *tun) reload(c *config.C, initial bool) error {
 
 	oldDefaultMTU := t.DefaultMTU
 	oldMaxMTU := t.MaxMTU
-	newDefaultMTU := c.GetInt("tun.mtu", DefaultMTU)
+	newDefaultMTU := getMTU(t.l, c)
 	newMaxMTU := newDefaultMTU
 	for i, r := range routes {
 		if r.MTU == 0 {
 			routes[i].MTU = newDefaultMTU
 		}
 
-		if r.MTU > t.MaxMTU {
+		if r.MTU > newMaxMTU {
 			newMaxMTU = r.MTU
 		}
 	}

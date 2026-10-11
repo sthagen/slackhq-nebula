@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/gaissmai/bart"
+	"github.com/rcrowley/go-metrics"
 	"github.com/slackhq/nebula/cert"
 	"github.com/slackhq/nebula/config"
 	"github.com/slackhq/nebula/header"
@@ -81,6 +82,8 @@ type LightHouse struct {
 
 	updateTrigger chan struct{}
 	queryChan     chan netip.Addr
+	// queryDropped counts queries QueryServer dropped because queryChan was full.
+	queryDropped metrics.Counter
 
 	calculatedRemotes atomic.Pointer[bart.Table[[]*calculatedRemote]] // Maps VpnAddr to []*calculatedRemote
 
@@ -116,7 +119,8 @@ func NewLightHouseFromConfig(ctx context.Context, l *slog.Logger, c *config.C, c
 		nebulaPort:         nebulaPort,
 		punchy:             p,
 		updateTrigger:      make(chan struct{}, 1),
-		queryChan:          make(chan netip.Addr, c.GetUint32("handshakes.query_buffer", 64)),
+		queryChan:          make(chan netip.Addr, c.GetUint32("handshakes.query_buffer", 1024)),
+		queryDropped:       metrics.GetOrRegisterCounter("lighthouse.query.dropped", nil),
 		l:                  l,
 	}
 	h.localAddrsFn = func(al *LocalAllowList) []netip.Addr {
@@ -355,7 +359,13 @@ func (lh *LightHouse) reload(c *config.C, initial bool) error {
 		}
 	}
 
-	if initial || c.HasChanged("relay.relays") {
+	// am_relay decides whether relay.relays applies to us at all
+	if initial || c.HasChanged("relay.relays") || c.HasChanged("relay.am_relay") {
+		var before []netip.Addr
+		if !initial {
+			before = lh.GetRelaysForMe()
+		}
+
 		switch c.GetBool("relay.am_relay", false) {
 		case true:
 			// Relays aren't allowed to specify other relays
@@ -379,6 +389,11 @@ func (lh *LightHouse) reload(c *config.C, initial bool) error {
 				}
 			}
 			lh.relaysForMe.Store(&relaysForMe)
+		}
+
+		// Tell the lighthouses now rather than at the next interval, but only when what we advertise changed
+		if !initial && !slices.Equal(before, lh.GetRelaysForMe()) {
+			lh.TriggerUpdate()
 		}
 	}
 
@@ -512,14 +527,19 @@ func (lh *LightHouse) Query(vpnAddr netip.Addr) *RemoteList {
 	return nil
 }
 
-// QueryServer is asynchronous so no reply should be expected
+// QueryServer is asynchronous and non-blocking, no reply should be expected.
+// If the query channel is full, the query is dropped.
 func (lh *LightHouse) QueryServer(vpnAddr netip.Addr) {
 	// Don't put lighthouse addrs in the query channel because we can't query lighthouses about lighthouses
 	if lh.amLighthouse || lh.IsLighthouseAddr(vpnAddr) {
 		return
 	}
 
-	lh.queryChan <- vpnAddr
+	select {
+	case lh.queryChan <- vpnAddr:
+	default:
+		lh.queryDropped.Inc(1)
+	}
 }
 
 func (lh *LightHouse) QueryCache(vpnAddrs []netip.Addr) *RemoteList {
@@ -1235,10 +1255,13 @@ func (lhh *LightHouseHandler) handleHostQuery(n *NebulaMeta, fromVpnAddrs []neti
 // sendHostPunchNotification signals the other side to punch some zero byte udp packets
 func (lhh *LightHouseHandler) sendHostPunchNotification(n *NebulaMeta, fromVpnAddrs []netip.Addr, punchNotifDest netip.Addr, w EncWriter) {
 	whereToPunch := fromVpnAddrs[0]
+	// Resolve the target before taking the querier's RemoteList lock below. GetHostInfo takes the
+	// hostmap lock, and the hostmap is taken before the lighthouse, which is taken before a
+	// RemoteList, so looking it up inside the callback would deadlock.
+	targetHI := lhh.lh.ifce.GetHostInfo(punchNotifDest)
 	found, ln, err := lhh.lh.queryAndPrepMessage(whereToPunch, func(c *cache) (int, error) {
 		n = lhh.resetMeta()
 		n.Type = NebulaMeta_HostPunchNotification
-		targetHI := lhh.lh.ifce.GetHostInfo(punchNotifDest)
 		var useVersion cert.Version
 		if targetHI == nil {
 			useVersion = lhh.lh.ifce.GetCertState().initiatingVersion
